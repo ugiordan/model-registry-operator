@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
 	"os"
 	"time"
@@ -153,7 +154,8 @@ func main() {
 			switch {
 			case apierrors.IsServiceUnavailable(err),
 				apierrors.IsTimeout(err),
-				apierrors.IsTooManyRequests(err):
+				apierrors.IsTooManyRequests(err),
+				errors.Is(err, context.DeadlineExceeded):
 				setupLog.Info("Transient API error reading TLS profile, using Intermediate fallback", "error", err)
 			default:
 				setupLog.Error(err, "unable to fetch TLS profile, using defaults")
