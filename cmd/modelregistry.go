@@ -96,7 +96,13 @@ func bindModelRegistryFlags(fs *flag.FlagSet) {
 func runModelRegistry(_ *cobra.Command, _ []string) error {
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zapOpts)))
 
-	capabilities, err := setup.GetCapabilities()
+	cfg, err := ctrl.GetConfig()
+	if err != nil {
+		setupLog.Error(err, "error getting cluster config")
+		os.Exit(1)
+	}
+
+	capabilities, err := setup.GetCapabilities(cfg)
 	if err != nil {
 		setupLog.Error(err, "error detecting cluster capabilities")
 		os.Exit(1)
@@ -108,7 +114,7 @@ func runModelRegistry(_ *cobra.Command, _ []string) error {
 		"hasAuthAPI", capabilities.HasAuthAPI)
 
 	// On OpenShift, fetch the cluster TLS security profile for webhook and metrics servers
-	tlsResult, err := setup.ConfigureTLS(scheme, capabilities.HasConfigAPI, setupLog)
+	tlsResult, err := setup.ConfigureTLS(cfg, scheme, capabilities.HasConfigAPI, setupLog)
 	if err != nil {
 		setupLog.Error(err, "unable to configure TLS")
 		os.Exit(1)
@@ -166,7 +172,7 @@ func runModelRegistry(_ *cobra.Command, _ []string) error {
 		cacheOptions.ByObject[&routev1.Route{}] = objOptions
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme: scheme,
 		Cache:  cacheOptions,
 		// Secrets are read but not created by the operator (user DB credentials, TLS certs),

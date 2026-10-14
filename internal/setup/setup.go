@@ -35,7 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	ctrl "sigs.k8s.io/controller-runtime"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gatewayapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayapiv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
@@ -80,11 +80,7 @@ func NewScheme() *runtime.Scheme {
 }
 
 // GetCapabilities detects cluster capabilities by querying the discovery API.
-func GetCapabilities() (controller.ClusterCapabilities, error) {
-	cfg, err := ctrl.GetConfig()
-	if err != nil {
-		return controller.ClusterCapabilities{}, err
-	}
+func GetCapabilities(cfg *rest.Config) (controller.ClusterCapabilities, error) {
 	client, err := discovery.NewDiscoveryClientForConfig(cfg)
 	if err != nil {
 		return controller.ClusterCapabilities{}, err
@@ -102,38 +98,21 @@ type TLSConfig struct {
 
 // ConfigureTLS reads the cluster TLS security profile (on OpenShift) and returns
 // TLS options suitable for webhook and metrics servers.
-func ConfigureTLS(scheme *runtime.Scheme, hasConfigAPI bool, log logr.Logger) (TLSConfig, error) {
+func ConfigureTLS(cfg *rest.Config, scheme *runtime.Scheme, hasConfigAPI bool, log logr.Logger) (TLSConfig, error) {
 	var result TLSConfig
 
 	if hasConfigAPI {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		bootstrapClient, err := client.New(ctrl.GetConfigOrDie(), client.Options{Scheme: scheme})
+		bootstrapCfg := rest.CopyConfig(cfg)
+		bootstrapCfg.Timeout = 10 * time.Second
+		bootstrapClient, err := client.New(bootstrapCfg, client.Options{Scheme: scheme})
 		if err != nil {
 			return TLSConfig{}, fmt.Errorf("unable to create bootstrap client for TLS profile: %w", err)
 		}
 
-		profile, err := tlspkg.FetchAPIServerTLSProfile(ctx, bootstrapClient)
-		if err != nil {
-			switch {
-			case isTransientAPIError(err):
-				log.Info("Transient API error reading TLS profile, using Intermediate fallback", "error", err)
-			default:
-				log.Error(err, "unable to fetch TLS profile, using defaults")
-			}
-			profile = *oapiconfig.TLSProfiles[oapiconfig.TLSProfileIntermediateType]
-		}
-		result.Profile = profile
-
-		tlsConfigFn, unsupportedCiphers := tlspkg.NewTLSConfigFromProfile(profile)
-		if len(unsupportedCiphers) > 0 {
-			log.Info("some ciphers from TLS profile are not supported by Go", "unsupported", unsupportedCiphers)
-		}
-		result.Opts = append(result.Opts, tlsConfigFn)
-
-		policy, adherenceErr := tlspkg.FetchAPIServerTLSAdherencePolicy(ctx, bootstrapClient)
-		result.AdherencePolicy, result.AdherenceFetched, err = resolveAdherencePolicy(policy, adherenceErr, log)
+		result, err = configureTLSFromClient(ctx, bootstrapClient, log)
 		if err != nil {
 			return TLSConfig{}, err
 		}
@@ -144,6 +123,121 @@ func ConfigureTLS(scheme *runtime.Scheme, hasConfigAPI bool, log logr.Logger) (T
 	})
 
 	return result, nil
+}
+
+func configureTLSFromClient(ctx context.Context, bootstrapClient client.Client, log logr.Logger) (TLSConfig, error) {
+	apiServer := &oapiconfig.APIServer{}
+	if err := bootstrapClient.Get(ctx, client.ObjectKey{Name: tlspkg.APIServerName}, apiServer); err != nil {
+		policy, fetched, policyErr := resolveAdherencePolicy(oapiconfig.TLSAdherencePolicyNoOpinion, err, log)
+		if policyErr != nil {
+			return TLSConfig{}, policyErr
+		}
+
+		if isTransientAPIError(err) {
+			log.Info("Transient API error reading TLS profile, using Intermediate fallback", "error", err)
+		} else {
+			log.Error(err, "unable to fetch TLS profile, using defaults")
+		}
+
+		profile := *oapiconfig.TLSProfiles[oapiconfig.TLSProfileIntermediateType]
+		option, optionErr := tlsOptionsFromProfile(profile, log)
+		if optionErr != nil {
+			return TLSConfig{}, optionErr
+		}
+		return TLSConfig{
+			Opts:             []func(*tls.Config){option},
+			Profile:          profile,
+			AdherencePolicy:  policy,
+			AdherenceFetched: fetched,
+		}, nil
+	}
+
+	profile, err := tlspkg.GetTLSProfileSpec(apiServer.Spec.TLSSecurityProfile)
+	if err != nil {
+		return TLSConfig{}, fmt.Errorf("unable to fetch TLS profile from APIServer %q: %w", tlspkg.APIServerName, err)
+	}
+	policy, fetched, err := resolveAdherencePolicy(apiServer.Spec.TLSAdherence, nil, log)
+	if err != nil {
+		return TLSConfig{}, err
+	}
+	option, err := tlsOptionsFromProfile(profile, log)
+	if err != nil {
+		return TLSConfig{}, err
+	}
+
+	return TLSConfig{
+		Opts:             []func(*tls.Config){option},
+		Profile:          profile,
+		AdherencePolicy:  policy,
+		AdherenceFetched: fetched,
+	}, nil
+}
+
+func tlsOptionsFromProfile(profile oapiconfig.TLSProfileSpec, log logr.Logger) (func(*tls.Config), error) {
+	minVersion, err := minTLSVersion(profile.MinTLSVersion)
+	if err != nil {
+		return nil, err
+	}
+
+	tlsConfigFn, unsupportedCiphers := tlspkg.NewTLSConfigFromProfile(profile)
+	if len(unsupportedCiphers) > 0 {
+		log.Info("some ciphers from TLS profile are not supported by Go", "unsupported", unsupportedCiphers)
+	}
+	if minVersion == tls.VersionTLS13 {
+		return tlsConfigFn, nil
+	}
+
+	scratch := &tls.Config{}
+	tlsConfigFn(scratch)
+	usable := usableCipherSuites(scratch.CipherSuites)
+	if len(profile.Ciphers) > 0 && len(usable) == 0 {
+		return nil, fmt.Errorf("failed to find usable cipher suites for TLS <= 1.2: all %d ciphers in TLS profile are TLS 1.3-only or unimplemented by Go", len(profile.Ciphers))
+	}
+
+	return func(config *tls.Config) {
+		tlsConfigFn(config)
+		if len(profile.Ciphers) > 0 {
+			config.CipherSuites = usable
+		}
+	}, nil
+}
+
+func minTLSVersion(version oapiconfig.TLSProtocolVersion) (uint16, error) {
+	switch version {
+	case "":
+		return tls.VersionTLS12, nil
+	case oapiconfig.VersionTLS10:
+		return tls.VersionTLS10, nil
+	case oapiconfig.VersionTLS11:
+		return tls.VersionTLS11, nil
+	case oapiconfig.VersionTLS12:
+		return tls.VersionTLS12, nil
+	case oapiconfig.VersionTLS13:
+		return tls.VersionTLS13, nil
+	default:
+		return 0, fmt.Errorf("failed to resolve minimum TLS version %q: unsupported", version)
+	}
+}
+
+func usableCipherSuites(mapped []uint16) []uint16 {
+	usable := make(map[uint16]struct{})
+	for _, suite := range tls.CipherSuites() {
+		usable[suite.ID] = struct{}{}
+	}
+	for _, suite := range tls.InsecureCipherSuites() {
+		usable[suite.ID] = struct{}{}
+	}
+
+	filtered := make([]uint16, 0, len(mapped))
+	for _, id := range mapped {
+		if id >= 0x1300 && id <= 0x13ff {
+			continue
+		}
+		if _, ok := usable[id]; ok {
+			filtered = append(filtered, id)
+		}
+	}
+	return filtered
 }
 
 // resolveAdherencePolicy decides the effective TLS adherence policy given the
@@ -166,19 +260,21 @@ func resolveAdherencePolicy(policy oapiconfig.TLSAdherencePolicy, err error, log
 }
 
 // classifyAdherenceFetchError decides how ConfigureTLS should react to an error
-// returned while fetching the cluster TLS adherence policy. It returns failClosed=true
-// when the operator must not continue (Forbidden / unexpected), and a human-readable
+// returned while fetching the cluster APIServer. It returns failClosed=true when
+// the operator must not continue (authorization / unexpected), and a human-readable
 // reason for logging or error wrapping.
 func classifyAdherenceFetchError(err error) (failClosed bool, reason string) {
 	switch {
 	case apierrors.IsNotFound(err), apimeta.IsNoMatchError(err):
 		return false, "APIServer resource not found, continuing with default TLS adherence policy"
 	case isTransientAPIError(err):
-		return false, "transient API error reading TLS adherence policy, continuing with defaults; watcher will retry"
+		return false, "transient API error reading APIServer TLS configuration, continuing with defaults; watcher will retry"
 	case apierrors.IsForbidden(err):
-		return true, "forbidden reading TLS adherence policy (check operator RBAC for the APIServer resource)"
+		return true, "forbidden reading APIServer TLS configuration (check operator RBAC for the APIServer resource)"
+	case apierrors.IsUnauthorized(err):
+		return true, "unauthorized reading APIServer TLS configuration (check operator credentials for the APIServer resource)"
 	default:
-		return true, "unexpected error reading TLS adherence policy"
+		return true, "unexpected error reading APIServer TLS configuration"
 	}
 }
 
