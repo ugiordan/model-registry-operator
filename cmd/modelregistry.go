@@ -24,6 +24,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/opendatahub-io/model-registry-operator/internal/setup"
+	tlsconfig "github.com/opendatahub-io/model-registry-operator/internal/tls"
 	"github.com/opendatahub-io/model-registry-operator/internal/webhook"
 
 	routev1 "github.com/openshift/api/route/v1"
@@ -114,7 +115,7 @@ func runModelRegistry(_ *cobra.Command, _ []string) error {
 		"hasAuthAPI", capabilities.HasAuthAPI)
 
 	// On OpenShift, fetch the cluster TLS security profile for webhook and metrics servers
-	tlsResult, err := setup.ConfigureTLS(cfg, scheme, capabilities.HasConfigAPI, setupLog)
+	tlsResult, err := tlsconfig.ConfigureTLS(cfg, scheme, capabilities.HasConfigAPI, setupLog)
 	if err != nil {
 		setupLog.Error(err, "unable to configure TLS")
 		os.Exit(1)

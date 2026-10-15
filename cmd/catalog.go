@@ -23,6 +23,7 @@ import (
 	"github.com/opendatahub-io/model-registry-operator/internal/controller"
 	"github.com/opendatahub-io/model-registry-operator/internal/controller/config"
 	"github.com/opendatahub-io/model-registry-operator/internal/setup"
+	tlsconfig "github.com/opendatahub-io/model-registry-operator/internal/tls"
 	"github.com/opendatahub-io/model-registry-operator/internal/webhook"
 	oapiconfig "github.com/openshift/api/config/v1"
 	imagev1 "github.com/openshift/api/image/v1"
@@ -120,7 +121,7 @@ func runCatalog(_ *cobra.Command, _ []string) error {
 		"hasConfigAPI", capabilities.HasConfigAPI,
 		"hasAuthAPI", capabilities.HasAuthAPI)
 
-	tlsResult, err := setup.ConfigureTLS(cfg, scheme, capabilities.HasConfigAPI, setupLog)
+	tlsResult, err := tlsconfig.ConfigureTLS(cfg, scheme, capabilities.HasConfigAPI, setupLog)
 	if err != nil {
 		setupLog.Error(err, "unable to configure TLS")
 		os.Exit(1)

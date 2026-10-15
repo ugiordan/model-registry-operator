@@ -25,6 +25,7 @@ import (
 	"github.com/opendatahub-io/model-registry-operator/internal/controller"
 	"github.com/opendatahub-io/model-registry-operator/internal/controller/config"
 	"github.com/opendatahub-io/model-registry-operator/internal/setup"
+	tlsconfig "github.com/opendatahub-io/model-registry-operator/internal/tls"
 	"github.com/opendatahub-io/odh-platform-utilities/pkg/deploy"
 	platformlabels "github.com/opendatahub-io/odh-platform-utilities/pkg/metadata/labels"
 	oapiconfig "github.com/openshift/api/config/v1"
@@ -88,7 +89,7 @@ func runAIHub(_ *cobra.Command, _ []string) error {
 		"hasAuthAPI", capabilities.HasAuthAPI)
 
 	// On OpenShift, fetch the cluster TLS security profile for the metrics server
-	tlsResult, err := setup.ConfigureTLS(cfg, scheme, capabilities.HasConfigAPI, setupLog)
+	tlsResult, err := tlsconfig.ConfigureTLS(cfg, scheme, capabilities.HasConfigAPI, setupLog)
 	if err != nil {
 		return fmt.Errorf("unable to configure TLS: %w", err)
 	}
