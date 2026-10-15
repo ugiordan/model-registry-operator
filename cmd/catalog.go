@@ -25,10 +25,10 @@ import (
 	"github.com/opendatahub-io/model-registry-operator/internal/setup"
 	tlsconfig "github.com/opendatahub-io/model-registry-operator/internal/tls"
 	"github.com/opendatahub-io/model-registry-operator/internal/webhook"
+	frameworktls "github.com/opendatahub-io/odh-platform-utilities/framework/tls"
 	oapiconfig "github.com/openshift/api/config/v1"
 	imagev1 "github.com/openshift/api/image/v1"
 	routev1 "github.com/openshift/api/route/v1"
-	tlspkg "github.com/openshift/controller-runtime-common/pkg/tls"
 	"github.com/spf13/cobra"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -235,7 +235,7 @@ func runCatalog(_ *cobra.Command, _ []string) error {
 	ctx, cancel := context.WithCancel(ctrl.SetupSignalHandler())
 	defer cancel()
 	if capabilities.HasConfigAPI {
-		watcher := &tlspkg.SecurityProfileWatcher{
+		watcher := &frameworktls.SecurityProfileWatcher{
 			Client:                mgr.GetClient(),
 			InitialTLSProfileSpec: tlsResult.Profile,
 			OnProfileChange: func(_ context.Context, _, _ oapiconfig.TLSProfileSpec) {

@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	frameworktls "github.com/opendatahub-io/odh-platform-utilities/framework/tls"
 	oapiconfig "github.com/openshift/api/config/v1"
 	tlspkg "github.com/openshift/controller-runtime-common/pkg/tls"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -71,40 +72,29 @@ func ConfigureTLS(cfg *rest.Config, scheme *runtime.Scheme, hasConfigAPI bool, l
 }
 
 func configureTLSFromClient(ctx context.Context, bootstrapClient client.Client, log logr.Logger) (TLSConfig, error) {
-	apiServer := &oapiconfig.APIServer{}
-	if err := bootstrapClient.Get(ctx, client.ObjectKey{Name: tlspkg.APIServerName}, apiServer); err != nil {
-		policy, fetched, policyErr := resolveAdherencePolicy(oapiconfig.TLSAdherencePolicyNoOpinion, err, log)
-		if policyErr != nil {
-			return TLSConfig{}, policyErr
-		}
-
-		if isTransientAPIError(err) {
-			log.Info("Transient API error reading TLS profile, using Intermediate fallback", "error", err)
-		} else {
-			log.Error(err, "unable to fetch TLS profile, using defaults")
-		}
-
-		profile := *oapiconfig.TLSProfiles[oapiconfig.TLSProfileIntermediateType]
-		option, optionErr := tlsOptionsFromProfile(profile, log)
-		if optionErr != nil {
-			return TLSConfig{}, optionErr
-		}
-		return TLSConfig{
-			Opts:             []func(*tls.Config){option},
-			Profile:          profile,
-			AdherencePolicy:  policy,
-			AdherenceFetched: fetched,
-		}, nil
-	}
-
-	profile, err := tlspkg.GetTLSProfileSpec(apiServer.Spec.TLSSecurityProfile)
+	reader := &apiServerReader{Reader: bootstrapClient}
+	loaded, err := frameworktls.LoadWithAdherence(ctx, reader)
 	if err != nil {
-		return TLSConfig{}, fmt.Errorf("unable to fetch TLS profile from APIServer %q: %w", tlspkg.APIServerName, err)
-	}
-	policy, fetched, err := resolveAdherencePolicy(apiServer.Spec.TLSAdherence, nil, log)
-	if err != nil {
+		if reader.err != nil {
+			_, _, err = resolveAdherencePolicy(oapiconfig.TLSAdherencePolicyNoOpinion, reader.err, log)
+		}
 		return TLSConfig{}, err
 	}
+
+	profile := loaded.Spec
+	if reader.apiServer != nil {
+		profile, err = tlspkg.GetTLSProfileSpec(reader.apiServer.Spec.TLSSecurityProfile)
+		if err != nil {
+			return TLSConfig{}, fmt.Errorf("unable to fetch TLS profile from APIServer %q: %w", tlspkg.APIServerName, err)
+		}
+	} else if reader.err != nil {
+		if isTransientAPIError(reader.err) {
+			log.Info("Transient API error reading TLS profile, using Intermediate fallback", "error", reader.err)
+		} else {
+			log.Error(reader.err, "unable to fetch TLS profile, using defaults")
+		}
+	}
+
 	option, err := tlsOptionsFromProfile(profile, log)
 	if err != nil {
 		return TLSConfig{}, err
@@ -113,9 +103,26 @@ func configureTLSFromClient(ctx context.Context, bootstrapClient client.Client, 
 	return TLSConfig{
 		Opts:             []func(*tls.Config){option},
 		Profile:          profile,
-		AdherencePolicy:  policy,
-		AdherenceFetched: fetched,
+		AdherencePolicy:  loaded.AdherencePolicy,
+		AdherenceFetched: true,
 	}, nil
+}
+
+type apiServerReader struct {
+	client.Reader
+	apiServer *oapiconfig.APIServer
+	err       error
+}
+
+func (r *apiServerReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	err := r.Reader.Get(ctx, key, obj, opts...)
+	if apiServer, ok := obj.(*oapiconfig.APIServer); ok {
+		r.err = err
+		if err == nil {
+			r.apiServer = apiServer
+		}
+	}
+	return err
 }
 
 func tlsOptionsFromProfile(profile oapiconfig.TLSProfileSpec, log logr.Logger) (func(*tls.Config), error) {
@@ -124,7 +131,7 @@ func tlsOptionsFromProfile(profile oapiconfig.TLSProfileSpec, log logr.Logger) (
 		return nil, err
 	}
 
-	tlsConfigFn, unsupportedCiphers := tlspkg.NewTLSConfigFromProfile(profile)
+	tlsConfigFn, unsupportedCiphers := frameworktls.ConfigFromProfile(profile)
 	if len(unsupportedCiphers) > 0 {
 		log.Info("some ciphers from TLS profile are not supported by Go", "unsupported", unsupportedCiphers)
 	}

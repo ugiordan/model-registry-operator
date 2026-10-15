@@ -26,10 +26,10 @@ import (
 	"github.com/opendatahub-io/model-registry-operator/internal/controller/config"
 	"github.com/opendatahub-io/model-registry-operator/internal/setup"
 	tlsconfig "github.com/opendatahub-io/model-registry-operator/internal/tls"
+	frameworktls "github.com/opendatahub-io/odh-platform-utilities/framework/tls"
 	"github.com/opendatahub-io/odh-platform-utilities/pkg/deploy"
 	platformlabels "github.com/opendatahub-io/odh-platform-utilities/pkg/metadata/labels"
 	oapiconfig "github.com/openshift/api/config/v1"
-	tlspkg "github.com/openshift/controller-runtime-common/pkg/tls"
 	"github.com/spf13/cobra"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -205,7 +205,7 @@ func runAIHub(_ *cobra.Command, _ []string) error {
 	ctx, cancel := context.WithCancel(ctrl.SetupSignalHandler())
 	defer cancel()
 	if capabilities.HasConfigAPI {
-		watcher := &tlspkg.SecurityProfileWatcher{
+		watcher := &frameworktls.SecurityProfileWatcher{
 			Client:                mgr.GetClient(),
 			InitialTLSProfileSpec: tlsResult.Profile,
 			OnProfileChange: func(_ context.Context, _, _ oapiconfig.TLSProfileSpec) {
